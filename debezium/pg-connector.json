@@ -1,0 +1,16 @@
+{
+  "name": "pg-transactions",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "database.hostname": "postgres",
+    "database.port": "5432",
+    "database.user": "postgres",
+    "database.password": "${POSTGRES_PASSWORD}",
+    "database.dbname": "financial_db",
+    "database.sslmode": "disable",
+    "topic.prefix": "pg",
+    "table.include.list": "public.transactions",
+    "plugin.name": "pgoutput",
+    "decimal.handling.mode": "string"
+  }
+}

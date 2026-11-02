@@ -1,0 +1,365 @@
+name: data-platform
+
+# Shared ClickHouse connection settings for Spark jobs (values come from .env)
+x-clickhouse-env: &clickhouse-env
+  CLICKHOUSE_HOST: clickhouse
+  CLICKHOUSE_PORT: "8123"
+  CLICKHOUSE_DB: financial_db
+  CLICKHOUSE_USER: clickhouse
+  CLICKHOUSE_PASSWORD: 2452005
+
+services:
+
+  # ============================================================
+  # 1. DATABASES
+  # ============================================================
+
+  postgres:
+    image: postgres:16
+    container_name: postgres
+    hostname: postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: "6112001"
+      POSTGRES_DB: airflow
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./sql/postgres_init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - data-platform-net
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: pgadmin
+    ports:
+      - "5050:80"
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@admin.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - data-platform-net
+
+  # ============================================================
+  # 2. KAFKA INFRASTRUCTURE
+  # ============================================================
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    container_name: zookeeper
+    hostname: zookeeper
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    healthcheck:
+      test: ["CMD-SHELL", "echo srvr | nc -w 2 localhost 2181"]
+      start_period: 10s
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+    networks:
+      - data-platform-net
+
+  broker:
+    image: confluentinc/cp-kafka:7.4.0
+    container_name: broker
+    hostname: broker
+    ports:
+      - "29092:29092"
+      - "9092:9092"
+      - "9101:9101"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://broker:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_JMX_PORT: 9101
+      KAFKA_JMX_HOSTNAME: localhost
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 9092"]
+      start_period: 15s
+      interval: 5s
+      timeout: 10s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - data-platform-net
+
+  # Lightweight Kafka UI — replaces the resource-heavy control-center
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    ports:
+      - "8085:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: broker:29092
+    depends_on:
+      broker:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - data-platform-net
+
+  # Confluent Control Center: topics, consumer lag, and Kafka Connect (Debezium) monitoring
+  control-center:
+    image: confluentinc/cp-enterprise-control-center:7.4.0
+    container_name: control-center
+    hostname: control-center
+    ports:
+      - "9021:9021"
+    environment:
+      CONTROL_CENTER_BOOTSTRAP_SERVERS: broker:29092
+      CONTROL_CENTER_CONNECT_CONNECT-CLUSTER_CLUSTER: http://debezium:8083
+      CONTROL_CENTER_REPLICATION_FACTOR: 1
+      CONTROL_CENTER_INTERNAL_TOPICS_PARTITIONS: 1
+      CONTROL_CENTER_MONITORING_INTERCEPTOR_TOPIC_PARTITIONS: 1
+      CONFLUENT_METRICS_TOPIC_REPLICATION: 1
+      CONFLUENT_METRICS_ENABLE: "false"
+      PORT: 9021
+    depends_on:
+      broker:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9021/health"]
+      start_period: 60s
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - data-platform-net
+
+  # ============================================================
+  # 3. CDC — DEBEZIUM / KAFKA CONNECT
+  # ============================================================
+
+  debezium:
+    image: quay.io/debezium/connect:2.5
+    container_name: debezium
+    hostname: debezium
+    ports:
+      - "8093:8083"
+    environment:
+      BOOTSTRAP_SERVERS: broker:29092
+      REST_ADVERTISED_HOST_NAME: debezium
+      REST_PORT: 8083
+      GROUP_ID: "1"
+      CONFIG_STORAGE_TOPIC: connect_configs
+      OFFSET_STORAGE_TOPIC: connect_offsets
+      STATUS_STORAGE_TOPIC: connect_statuses
+      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      STATUS_STORAGE_REPLICATION_FACTOR: 1
+      ENABLE_DEBEZIUM_SCRIPTING: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      broker:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - --silent
+        - --fail
+        - http://localhost:8083/connectors
+      start_period: 60s
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - data-platform-net
+
+  debezium-ui:
+    image: quay.io/debezium/debezium-ui:2.4
+    container_name: debezium-ui
+    hostname: debezium-ui
+    ports:
+      - "8082:8080"   # changed from 8081 to avoid conflict with Spark UI
+    environment:
+      KAFKA_CONNECT_URIS: http://debezium:8083
+    depends_on:
+      debezium:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - data-platform-net
+
+  # ============================================================
+  # 4. STREAM PROCESSING — SPARK (writes to ClickHouse)
+  # ============================================================
+  # Submit with the Kafka + ClickHouse JDBC packages, see jobs/spark_to_clickhouse.py
+
+  spark:
+    image: apache/spark:3.5.0
+    container_name: spark-master
+    hostname: spark
+    user: root
+    entrypoint: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
+    ports:
+      - "8081:8080"   # Spark Web UI
+      - "7077:7077"   # Spark master port
+    environment:
+      SPARK_MASTER_HOST: spark
+      SPARK_MASTER_PORT: "7077"
+      SPARK_MASTER_WEBUI_PORT: "8080"
+    volumes:
+      - ./transactions_stream.py:/opt/spark-apps/transactions_stream.py
+      - ./jobs:/opt/spark-apps/jobs
+    depends_on:
+      broker:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - data-platform-net
+
+  spark-worker:
+    image: apache/spark:3.5.0
+    container_name: spark-worker
+    user: root
+    entrypoint: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark:7077"]
+    environment:
+      SPARK_WORKER_MEMORY: 2G
+      SPARK_WORKER_CORES: "2"
+      SPARK_WORKER_WEBUI_PORT: "8083"
+    volumes:
+      - ./transactions_stream.py:/opt/spark-apps/transactions_stream.py
+      - ./jobs:/opt/spark-apps/jobs
+    depends_on:
+      - spark
+    restart: unless-stopped
+    networks:
+      - data-platform-net
+
+  # ============================================================
+  # 5. WAREHOUSE — CLICKHOUSE
+  # ============================================================
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3
+    container_name: clickhouse
+    hostname: clickhouse
+    ports:
+      - "8123:8123"   # HTTP interface, built-in web UI at http://localhost:8123/play
+      - "9000:9000"   # native TCP interface
+    environment:
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-financial_db}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-clickhouse}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?Set CLICKHOUSE_PASSWORD in .env}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./sql/clickhouse_init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8123/ping || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - data-platform-net
+
+  # One-shot job: Kafka -> Spark -> ClickHouse. Not started by a plain "docker compose up".
+  # Run it with:  docker compose --profile jobs up clickhouse-loader
+  clickhouse-loader:
+    image: apache/spark:3.5.0
+    container_name: clickhouse-loader
+    hostname: clickhouse-loader
+    user: root
+    profiles: ["jobs"]
+    entrypoint: ["/opt/spark/bin/spark-submit"]
+    command:
+      - --master
+      - spark://spark:7077
+      - --packages
+      - org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,com.clickhouse:clickhouse-jdbc:0.6.3,org.apache.httpcomponents.client5:httpclient5:5.3.1
+      - --conf
+      - spark.jars.ivy=/ivy                  # cached in a volume, so packages download only once
+      - --conf
+      - spark.driver.host=clickhouse-loader  # executors on spark-worker connect back to this host
+      - --conf
+      - spark.driver.bindAddress=0.0.0.0
+      - --conf
+      - spark.driver.port=7078
+      - --conf
+      - spark.blockManager.port=7079
+      - --conf
+      - spark.driver.extraJavaOptions=-Duser.timezone=UTC
+      - --conf
+      - spark.executor.extraJavaOptions=-Duser.timezone=UTC
+      - /opt/spark-apps/jobs/spark_to_clickhouse.py
+    environment:
+      <<: *clickhouse-env
+      KAFKA_BOOTSTRAP_SERVERS: broker:29092
+      KAFKA_TOPIC: ${KAFKA_TOPIC:-pg.public.transactions}
+    volumes:
+      - ./jobs:/opt/spark-apps/jobs        # job code and checkpoints (jobs/_checkpoints)
+      - spark_ivy:/ivy
+    depends_on:
+      spark:
+        condition: service_started
+      spark-worker:
+        condition: service_started
+      broker:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - data-platform-net
+
+# ============================================================
+# 6. NETWORKS AND PERSISTENT STORAGE
+# ============================================================
+
+networks:
+  data-platform-net:
+    name: data-platform-net
+    driver: bridge
+
+volumes:
+  postgres_data:
+  pgadmin_data:
+  clickhouse_data:
+  spark_ivy:

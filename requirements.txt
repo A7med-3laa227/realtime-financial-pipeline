@@ -1,0 +1,4 @@
+# Dependencies for main.py (transaction seed script)
+# Install with: pip install -r requirements.txt
+psycopg2-binary>=2.9
+faker>=24.0
