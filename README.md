@@ -4,35 +4,7 @@ A production-style, end-to-end **streaming data platform** that ingests financia
 
 ## Architecture
 
-```
-┌─────────────┐   INSERT    ┌──────────────┐   CDC (WAL)   ┌──────────────┐
-│  main.py    │ ──────────► │  PostgreSQL  │ ────────────► │   Debezium   │
-│ (generator) │             │ (financial_db│               │ Kafka Connect │
-└─────────────┘             └──────────────┘               └──────┬───────┘
-                                                                   │ Kafka topic
-                                                                   ▼
-                                                          ┌──────────────────┐
-                                                          │  Apache Kafka    │
-                                                          │  (pg.public.     │
-                                                          │   transactions)  │
-                                                          └────────┬─────────┘
-                                                                   │
-                                                                   ▼
-                                                     ┌────────────────────────┐
-                                                     │  Apache Spark          │
-                                                     │  Structured Streaming  │
-                                                     │  (clickhouse-loader)   │
-                                                     └────────────┬───────────┘
-                                                                  │ JDBC
-                                                                  ▼
-                                                     ┌────────────────────────┐
-                                                     │      ClickHouse        │
-                                                     │   financial_db         │
-                                                     │  ├─ transactions       │
-                                                     │  ├─ transactions_current│
-                                                     │  └─ daily_spend        │
-                                                     └────────────────────────┘
-```
+![System Architecture](architecture.png)
 
 ## Stack
 
