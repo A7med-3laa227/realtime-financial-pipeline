@@ -1,4 +1,3 @@
-<img width="2400" height="1351" alt="architecture drawio" src="https://github.com/user-attachments/assets/e96a75a5-4ccf-4e38-9e30-afb0465145f8" />
 # Real-Time Financial Transactions Pipeline
 
 A production-style, end-to-end **streaming data platform** that ingests financial transactions, streams changes via CDC, processes them with Apache Spark, and lands them in ClickHouse for analytics.
